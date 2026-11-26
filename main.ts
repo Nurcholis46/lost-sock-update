@@ -1,73 +1,52 @@
-import { chmodSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+// lost-sock-update entrypoint
+// Writes the single-line status update to /output/entry.txt.
+// Gate: UTF-8, 1-120 code points, exactly one line, not blank.
 
-// Bounty: u-eager-stork-81-9647-funniest-lost-sock-status-update-4b1fa3ce — "Funniest Lost Sock Status Update" ($2 USDC).
-// Gate: /output/entry.txt must be UTF-8 text of 1-120 characters, not only white space.
-// Rationale: a dated status update ("Day 3") in a lost sock's deadpan voice, stuck by static
-// to a stranger's hoodie — somewhere it should not be. The premise is inevitable for a sock
-// (shared laundry, static cling) and twists the obvious missing-partner material into a
-// mistaken-identity mix-up, with the punchline landing in the last five words: "I am not his sock."
-// Small, domestic and a little anxious, never a person in a sock costume.
-// The bounty requires 1-120 characters, not only white space, and a single
-// line: fail loudly instead of writing an entry the judge would refuse.
-// The gate is strict on purpose — the entry file must be exactly this one
-// line, byte for byte: no carriage return (a second kind of line break),
-// no leading or trailing padding (the judge reads the file as submitted),
-// and no control characters (including U+2028 and U+2029, which look like
-// line breaks to a reader but not to a naive newline check).
-const text =
-  "Day 3 stuck to a stranger's hoodie. He keeps apologizing to his wife. I am not his sock.";
+import { chmodSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 
-const codePoints = [...text].length;
-if (codePoints < 1 || codePoints > 120 || text.trim().length === 0) {
-  throw new Error(
-    `entry must be 1-120 characters of non-blank text, got ${codePoints}`,
-  );
-}
-if (text.includes("\n") || text.includes("\r")) {
-  throw new Error("entry must be a single line");
-}
-if (text.includes("\u2028") || text.includes("\u2029")) {
-  throw new Error("entry must not contain line/paragraph separators");
-}
-if (text !== text.trim()) {
-  throw new Error("entry must not start or end with whitespace");
-}
-// A byte-order mark or zero-width character would be read as part of the
-// line without ever being seen, and would change the entry's byte length
-// against its character count: reject them alongside the control set.
-if (/[\u0000-\u001f\u007f\ufeff\u200b-\u200d]/.test(text)) {
-  throw new Error("entry must not contain control or invisible characters");
+const LINE = "Day 3 stuck to a stranger's hoodie. He keeps apologizing to his wife. I am not his sock.";
+const OUT_PATH = "/output/entry.txt";
+const TMP_PATH = "/output/.entry.txt.tmp";
+
+function fail(message: string): never {
+  console.error(`error: ${message}`);
+  process.exit(1);
 }
 
+// --- gate checks -----------------------------------------------------------
+if (typeof LINE !== "string") fail("entry must be a string");
+
+const codePointCount = [...LINE].length;
+if (codePointCount < 1 || codePointCount > 120) {
+  fail(`entry length ${codePointCount} outside 1..120`);
+}
+if (LINE.trim().length === 0) fail("entry is blank");
+if (LINE !== LINE.trim()) fail("entry has leading or trailing whitespace");
+if (LINE.includes("\n") || LINE.includes("\r")) fail("entry must be a single line");
+
+// --- write atomically ------------------------------------------------------
 mkdirSync("/output", { recursive: true });
-// Write atomically: a crash mid-write must never leave a partial entry.txt
-// for the grader to read — write the temp file beside it, then rename it
-// into place, so entry.txt is always the whole line or nothing.
-const tmpPath = "/output/.entry.txt.tmp";
-writeFileSync(tmpPath, text, { encoding: "utf8", mode: 0o644 });
-// The grader collects outputs as another user: leave the file readable by
-// everyone, or the run fails with "<path> is not readable".
-chmodSync(tmpPath, 0o644);
-renameSync(tmpPath, "/output/entry.txt");
 
-// Read it back and prove the file on disk is exactly the line: a write
-// that silently truncated, re-encoded or padded the entry would otherwise
-// ship a different text to the judge than the one gated above.
-const written = readFileSync("/output/entry.txt", "utf8");
-if (written !== text) {
-  throw new Error("entry file does not match the gated line");
+const payload = Buffer.from(LINE, "utf8");
+writeFileSync(TMP_PATH, payload);
+chmodSync(TMP_PATH, 0o644);
+renameSync(TMP_PATH, OUT_PATH);
+chmodSync(OUT_PATH, 0o644);
+
+// --- read-back verify ------------------------------------------------------
+const written = readFileSync(OUT_PATH);
+if (!written.equals(payload)) {
+  fail("read-back mismatch: bytes on disk differ from entry");
 }
-// The file must end exactly at the last character: a trailing newline
-// would make the entry two lines to a reader that counts lines, and the
-// equality check above would already have caught it — this asserts the
-// invariant on its own so a future edit that relaxes the write cannot
-// silently reintroduce it.
-if (written.endsWith("\n") || written.endsWith("\r")) {
-  throw new Error("entry file must not end with a line break");
+if (written.toString("utf8") !== LINE) {
+  fail("read-back mismatch: decoded text differs from entry");
 }
-// Byte-length check: the gate counts characters, the judge reads bytes.
-// A re-encode or stray padding that survived the string compare above
-// would change the file's size and ship a different text to the judge.
-if (Buffer.byteLength(written, "utf8") !== Buffer.byteLength(text, "utf8")) {
-  throw new Error("entry file byte length does not match the gated line");
+if (written.length !== payload.length) {
+  fail(`byte length mismatch: ${written.length} !== ${payload.length}`);
 }
+const mode = statSync(OUT_PATH).mode & 0o777;
+if (mode !== 0o644) {
+  fail(`mode mismatch: got 0${mode.toString(8)}, want 0644`);
+}
+
+console.log("ok");
